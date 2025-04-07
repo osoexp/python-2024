@@ -1,0 +1,44 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Minimal EC2 instance for CFEC2'
+
+Resources:
+  CFEC2SecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: 'Allow SSH and EC2 web access'
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+
+  CFEC2Instance:
+    Type: 'AWS::EC2::Instance'
+    Properties:
+      InstanceType: t3.micro  # 2 vCPU, 1GB RAM (meets minimum 1GB requirement)
+      ImageId: ami-0c02fb55956c7d316  # Amazon Linux 2
+      KeyName: CF-AMZ  # REPLACE WITH YOUR KEY PAIR
+      SecurityGroupIds:
+        - !Ref CFEC2SecurityGroup
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 10  # GB (min 1GB + buffer)
+            VolumeType: gp2
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          sudo amazon-linux-extras install -y
+
+
+Outputs:
+  CFEC2URL:
+    Description: 'CFEC2 web interface URL'
+    Value: !Sub 'http://${CFEC2Instance.PublicIp}:8080'
+  SSHCommand:
+    Description: 'SSH access command'
+    Value: !Sub 'ssh -i your-key.pem ec2-user@${CFEC2Instance.PublicIp}'

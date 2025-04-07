@@ -1,0 +1,259 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for LGMedia setup with fixed MediaCatalog table
+
+Resources:
+  # 1. Networking Setup
+  LGMediaVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: LGMediaVPC
+
+  LGMediaIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: LGMediaIGW
+
+  AttachIGW:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref LGMediaVPC
+      InternetGatewayId: !Ref LGMediaIGW
+
+  LGMPubSub1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref LGMediaVPC
+      MapPublicIpOnLaunch: true
+      CidrBlock: 10.10.1.0/24
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: LGMPubSub1
+
+  PubRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref LGMediaVPC
+      Tags:
+        - Key: Name
+          Value: LGMPubRouteTable
+
+  PubRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PubRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref LGMediaIGW
+
+  PubSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref LGMPubSub1
+      RouteTableId: !Ref PubRouteTable
+
+  # 2. EC2 Instances
+  LGMediaEC2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - LGMediaEC2InstanceProfile
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-0c02fb55956c7d316
+      KeyName: lgmediaKEY
+      SubnetId: !Ref LGMPubSub1
+      SecurityGroupIds:
+        - !Ref LGMediaEC2SG
+      IamInstanceProfile: !Ref LGMediaEC2InstanceProfile
+      Tags:
+        - Key: Name
+          Value: LGMediaEC2
+
+  LGMediaEC2Writer:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - MediaCatalog  # Changed from LGMDDBTable
+      - LGMediaEC2WriterInstanceProfile
+    Properties:
+      InstanceType: t2.micro
+      ImageId: ami-0c02fb55956c7d316
+      KeyName: lgmediaKEY
+      SubnetId: !Ref LGMPubSub1
+      SecurityGroupIds:
+        - !Ref LGMediaEC2SG
+      IamInstanceProfile: !Ref LGMediaEC2WriterInstanceProfile
+      UserData: 
+        Fn::Base64: |
+          #!/bin/bash
+          # System updates
+          yum install -y amazon-linux-extras
+          amazon-linux-extras enable python3.9
+          yum install -y python3.9
+          pip3.9 install boto3
+          
+          # Write Python script with fixed table name
+          cat > /home/ec2-user/DynamoDB-Movie.py << 'EOF'
+          import boto3
+          import time
+          
+          TABLE_NAME = 'MediaCatalog'  # Fixed table name
+          
+          def populate_movies():
+              dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+              table = dynamodb.Table(TABLE_NAME)
+              
+              movies = [
+                  {"Title": "Top Gun", "Genre": "Action", "ReleaseDate": "1986-05-16", "Rating": 8},
+                  {"Title": "Top Gun: Maverick", "Genre": "Action", "ReleaseDate": "2022-05-27", "Rating": 8.5},
+                  {"Title": "Legend", "Genre": "Fantasy", "ReleaseDate": "1985-04-18", "Rating": 6.5},
+                  {"Title": "Minority Report", "Genre": "Sci-Fi", "ReleaseDate": "2002-06-21", "Rating": 8},
+                  {"Title": "Mission: Impossible", "Genre": "Action", "ReleaseDate": "1996-05-22", "Rating": 7.8},
+                  {"Title": "Risky Business", "Genre": "Comedy", "ReleaseDate": "1983-08-05", "Rating": 7},
+                  {"Title": "The Outsiders", "Genre": "Drama", "ReleaseDate": "1983-03-25", "Rating": 7.1},
+                  {"Title": "All the Right Moves", "Genre": "Drama", "ReleaseDate": "1983-10-21", "Rating": 6.1},
+                  {"Title": "Losin' It", "Genre": "Comedy", "ReleaseDate": "1983-04-08", "Rating": 5.2},
+                  {"Title": "The Color of Money", "Genre": "Drama", "ReleaseDate": "1986-10-17", "Rating": 7}
+              ]
+              
+              for movie in movies:
+                  try:
+                      table.put_item(Item=movie)
+                      print(f"Added: {movie['Title']}")
+                  except Exception as e:
+                      print(f"Error adding {movie['Title']}: {str(e)}")
+          
+          if __name__ == "__main__":
+              dynamodb = boto3.client('dynamodb', region_name='us-east-1')
+              
+              print(f"Waiting for table {TABLE_NAME} to become active...")
+              while True:
+                  try:
+                      if dynamodb.describe_table(TableName=TABLE_NAME)['Table']['TableStatus'] == 'ACTIVE':
+                          populate_movies()
+                          print("Data population completed successfully")
+                          break
+                      print("Table found but not active yet, waiting...")
+                      time.sleep(5)
+                  except dynamodb.exceptions.ResourceNotFoundException:
+                      print(f"Table {TABLE_NAME} not found yet, waiting...")
+                      time.sleep(5)
+                  except Exception as e:
+                      print(f"Unexpected error: {str(e)}")
+                      time.sleep(5)
+          EOF
+          
+          # Set permissions
+          chown ec2-user:ec2-user /home/ec2-user/DynamoDB-Movie.py
+          chmod 755 /home/ec2-user/DynamoDB-Movie.py
+          
+          echo "To run the script: python3.9 /home/ec2-user/DynamoDB-Movie.py"
+      Tags:
+        - Key: Name
+          Value: LGMediaEC2Writer
+
+  # 3. Security Group
+  LGMediaEC2SG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for LGMediaEC2
+      VpcId: !Ref LGMediaVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: LGMediaEC2SG
+
+  # 4. DynamoDB Table (renamed to MediaCatalog)
+  MediaCatalog:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: "MediaCatalog"  # Fixed name
+      AttributeDefinitions:
+        - AttributeName: Title
+          AttributeType: S
+      KeySchema:
+        - AttributeName: Title
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
+      SSESpecification:
+        SSEEnabled: true
+
+  # 5. IAM Roles
+  LGMediaEC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBReadOnlyAccess
+      Tags:
+        - Key: Name
+          Value: LGMediaEC2Role
+
+  LGMediaEC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref LGMediaEC2Role
+
+  LGMediaEC2WriterRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoDBAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource: !GetAtt MediaCatalog.Arn
+      Tags:
+        - Key: Name
+          Value: LGMediaEC2WriterRole
+
+  LGMediaEC2WriterInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref LGMediaEC2WriterRole
+
+Outputs:
+  LGMediaVPCId:
+    Description: ID of the LGMediaVPC
+    Value: !Ref LGMediaVPC
+  LGMediaEC2PublicIP:
+    Description: Public IP of the LGMediaEC2 instance
+    Value: !GetAtt LGMediaEC2.PublicIp
+  LGMediaEC2WriterPublicIP:
+    Description: Public IP of the LGMediaEC2Writer instance
+    Value: !GetAtt LGMediaEC2Writer.PublicIp
+  MediaCatalogTableName:
+    Description: Name of the DynamoDB table
+    Value: !Ref MediaCatalog

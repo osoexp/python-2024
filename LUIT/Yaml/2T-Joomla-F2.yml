@@ -1,0 +1,264 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CloudFormation template for Aurora Digital infrastructure.
+
+Parameters:
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to SSH into the instance
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: ADVWorks
+  DBUsername:
+    Description: Database admin username
+    Type: String
+    Default: joomlaadmin
+  DBPassword:
+    Description: Database admin password
+    Type: String
+    NoEcho: true
+    Default: WorstPasswordEver!
+  DBName:
+    Description: Joomla Database Name
+    Type: String
+    Default: joomladb
+  InstanceType:
+    Description: EC2 instance type
+    Type: String
+    Default: t3.micro
+
+Resources:
+  # Custom VPC
+  ADVWorksVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: ADVWorksVPC
+
+  # Internet Gateway
+  ADVWorksIGW:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: ADVWorksIGW
+
+  # Attach Internet Gateway to VPC
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ADVWorksVPC
+      InternetGatewayId: !Ref ADVWorksIGW
+
+  # Public Subnets
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ADVWorksVPC
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: PublicSubnet1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ADVWorksVPC
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: us-east-1b
+      Tags:
+        - Key: Name
+          Value: PublicSubnet2
+
+  # Private Subnets
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ADVWorksVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: us-east-1a
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ADVWorksVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: us-east-1b
+      Tags:
+        - Key: Name
+          Value: PrivateSubnet2
+
+  # Public Route Table
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ADVWorksVPC
+      Tags:
+        - Key: Name
+          Value: PublicRouteTable
+
+  # Public Route to Internet Gateway
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref ADVWorksIGW
+
+  # Associate Public Subnets with Public Route Table
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # Private Route Table (Local Routing)
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ADVWorksVPC
+      Tags:
+        - Key: Name
+          Value: PrivateRouteTable
+
+  # Associate Private Subnets with Private Route Table
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # Security Group for EC2
+  ADVWorksSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Aurora Digital Security Group
+      VpcId: !Ref ADVWorksVPC
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow SSH
+          FromPort: 22
+          ToPort: 22
+          IpProtocol: tcp
+        - CidrIp: 0.0.0.0/0
+          Description: Allow HTTP
+          FromPort: 80
+          ToPort: 80
+          IpProtocol: tcp
+        - CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS
+          FromPort: 443
+          ToPort: 443
+          IpProtocol: tcp
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: ADVWorksSG
+
+  # Security Group for RDS
+  AuroraRDSSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Aurora RDS
+      VpcId: !Ref ADVWorksVPC
+      SecurityGroupIngress:
+        - SourceSecurityGroupId: !GetAtt ADVWorksSG.GroupId
+          Description: Allow MySQL traffic from EC2 instance
+          FromPort: 3306
+          ToPort: 3306
+          IpProtocol: tcp
+      Tags:
+        - Key: Name
+          Value: AuroraRDSSG
+
+  # RDS Subnet Group
+  AuroraDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Aurora Digital RDS Subnet Group
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: AuroraDBSubnetGroup
+
+  # RDS MySQL Database
+  JoomlaDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: joomla-db
+      Engine: mysql
+      EngineVersion: '8.0'
+      DBInstanceClass: db.t3.micro
+      AllocatedStorage: 20
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBName: !Ref DBName
+      DBSubnetGroupName: !Ref AuroraDBSubnetGroup
+      PubliclyAccessible: false
+      MultiAZ: false
+      VPCSecurityGroups:
+        - !GetAtt AuroraRDSSG.GroupId
+
+  # EC2 Instance for Joomla
+  JoomlaEC2Instance:
+    Type: AWS::EC2::Instance
+    DependsOn: ADVWorksSG
+    Properties:
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet1
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !GetAtt ADVWorksSG.GroupId
+      ImageId: ami-04b4f1a9cf54c11d0 # Ubuntu 22.04
+      UserData: !Base64
+        Fn::Sub: |
+          #!/bin/bash
+          set -ex
+          apt-get update -y
+          sudo apt-get install -y apache2 php libapache2-mod-php php-mysql php-xml php-gd unzip
+          sudo systemctl enable apache2
+          cd /var/www/html
+          sudo curl -L -o joomla.zip https://github.com/joomla/joomla-cms/releases/download/3.9.28/Joomla_3.9.28-Stable-Full_Package.zip
+          sudo unzip joomla.zip
+          rm joomla.zip
+          sudo chown -R www-data:www-data /var/www/html
+          sudo chmod -R 755 /var/www/html
+          sudo sed -i 's|DirectoryIndex index.html|DirectoryIndex index.php index.html|' /etc/apache2/mods-enabled/dir.conf
+          sudo systemctl restart apache2
+          sudo a2enmod rewrite
+          echo "<Directory /var/www/html>
+          AllowOverride All
+          Require all granted
+          </Directory>" | sudo tee /etc/apache2/sites-available/000-default.conf
+          sudo systemctl restart apache2
+Outputs:
+  JoomlaWebsite:
+    Description: Joomla Website URL
+    Value: !Sub http://${JoomlaEC2Instance.PublicDnsName}
+  RDSEndpoint:
+    Description: RDS Endpoint
+    Value: !GetAtt JoomlaDatabase.Endpoint.Address
